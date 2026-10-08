@@ -191,22 +191,25 @@ function edgeDiffs<T>(
   oldItems: T[],
   newItems: T[],
   keyOf: (value: T) => string,
-  presentationOnly = false
+  presentationOnly = false,
+  comparable: (value: T, old: boolean) => T = (value) => value
 ): FBDItemDiff<T>[] {
+  const oldValues = oldItems.map((item) => comparable(item, true));
+  const newValues = newItems.map((item) => comparable(item, false));
   const buckets = new Map<string, number[]>();
-  oldItems.forEach((item, index) => {
+  oldValues.forEach((item, index) => {
     const key = keyOf(item);
     buckets.set(key, [...(buckets.get(key) ?? []), index]);
   });
   const used = new Set<number>();
   // Reserve every exact match before a modified edge can consume its candidate.
-  const exactMatches = newItems.map((value) => {
+  const exactMatches = newValues.map((value) => {
     const candidates = buckets.get(keyOf(value)) ?? [];
-    const exact = candidates.findIndex((index) => stable(oldItems[index]) === stable(value));
+    const exact = candidates.findIndex((index) => stable(oldValues[index]) === stable(value));
     return exact < 0 ? undefined : candidates.splice(exact, 1)[0];
   });
   const result = newItems.map((newValue, newIndex) => {
-    const candidates = buckets.get(keyOf(newValue)) ?? [];
+    const candidates = buckets.get(keyOf(newValues[newIndex])) ?? [];
     const oldIndex = exactMatches[newIndex] ?? candidates.shift();
     if (oldIndex !== undefined) used.add(oldIndex);
     return itemDiff(
@@ -218,8 +221,8 @@ function edgeDiffs<T>(
         ambiguous: false,
       },
       properties(
-        oldIndex === undefined ? undefined : oldItems[oldIndex],
-        newValue,
+        oldIndex === undefined ? undefined : oldValues[oldIndex],
+        newValues[newIndex],
         presentationOnly
       ),
       presentationOnly ? 'presentation' : 'logic'
@@ -248,9 +251,10 @@ function elementCategory(element: NormalizedFBDElement): FBDChangeCategory {
       : 'logic';
 }
 function elementComparable(element: NormalizedFBDElement): unknown {
-  if (!('ports' in element) || element.ports[0] === 'value') return element;
+  if (!('ports' in element) || element.ports[0] === 'value') return { ...element, id: undefined };
   return {
     ...element,
+    id: undefined,
     ports: [...element.ports].sort((a, b) =>
       compareKeys(
         stable(typeof a === 'string' ? a : [a.id, a.direction]),
@@ -258,6 +262,52 @@ function elementComparable(element: NormalizedFBDElement): unknown {
       )
     ),
   };
+}
+
+/** Source IDs are only addresses. Reserve semantic matches before considering edits. */
+function pairElements(oldItems: NormalizedFBDElement[], newItems: NormalizedFBDElement[]): Pair<NormalizedFBDElement>[] {
+  const sourcePairs = pairUnique(oldItems, newItems, (element) => numericId(element.id));
+  const invalidOld = new Set(sourcePairs.filter((pair) => pair.ambiguous).map((pair) => pair.oldIndex));
+  const invalidNew = new Set(sourcePairs.filter((pair) => pair.ambiguous).map((pair) => pair.newIndex));
+  const matches = new Map<number, number>(), used = new Set<number>();
+  const identity = (element: NormalizedFBDElement, operand = true) => stable(
+    Object.fromEntries(Object.entries(element).filter(([key]) =>
+      ['kind', 'instruction', 'name', 'referenceType', 'connectorType', 'operation', 'sourceKind',
+        ...(operand ? ['operand'] : [])].includes(key)))
+  );
+  for (const keyOf of [
+    (element: NormalizedFBDElement) => stable(elementComparable(element)),
+    (element: NormalizedFBDElement) => identity(element),
+    (element: NormalizedFBDElement) => identity(element, false),
+    (element: NormalizedFBDElement) => stable([element.kind, element.position]),
+  ]) {
+    const candidates = (items: NormalizedFBDElement[], old: boolean) => items
+      .map((element, index) => ({ element, index }))
+      .filter(({ index }) => old ? !invalidOld.has(index) && !used.has(index)
+        : !invalidNew.has(index) && !matches.has(index));
+    for (const pair of pairUnique(candidates(oldItems, true), candidates(newItems, false),
+      (item) => keyOf(item.element))) {
+      if (pair.oldValue && pair.newValue) {
+        matches.set(pair.newValue.index, pair.oldValue.index);
+        used.add(pair.oldValue.index);
+      }
+    }
+  }
+  const result: Pair<NormalizedFBDElement>[] = newItems.map((newValue, newIndex) => {
+    const oldIndex = matches.get(newIndex);
+    return { newValue, newIndex, oldIndex,
+      oldValue: oldIndex === undefined ? undefined : oldItems[oldIndex],
+      ambiguous: invalidNew.has(newIndex) || (oldIndex === undefined && oldItems.some(
+        (element, index) => !used.has(index) && identity(element, false) === identity(newValue, false))),
+    };
+  });
+  oldItems.forEach((oldValue, oldIndex) => {
+    if (!used.has(oldIndex)) result.push({ oldValue, oldIndex,
+      ambiguous: invalidOld.has(oldIndex) || newItems.some((element, index) =>
+        !matches.has(index) && identity(element, false) === identity(oldValue, false)),
+    });
+  });
+  return result;
 }
 
 /** Compare only normalized FBD content. Preserved XML/protected payloads require document comparison. */
@@ -290,13 +340,11 @@ export function diffFBD(oldBody?: NormalizedFBDBody, newBody?: NormalizedFBDBody
         code: 'FBD_DIFF_SHEET_ID_AMBIGUOUS',
         message: `Sheet ${number}: missing or duplicate source sheet number; versions are not paired.`,
       });
-    const elements = pairUnique(oldValue?.elements ?? [], newValue?.elements ?? [], (element) =>
-      numericId(element.id)
-    ).map((elementPair) => {
+    const elements = pairElements(oldValue?.elements ?? [], newValue?.elements ?? []).map((elementPair) => {
       if (elementPair.ambiguous)
         diagnostics.push({
           code: 'FBD_DIFF_ELEMENT_ID_AMBIGUOUS',
-          message: `Sheet ${number}: missing or duplicate element ID ${elementPair.newValue?.id ?? elementPair.oldValue?.id ?? '(missing)'}; elements are not paired.`,
+          message: `Sheet ${number}: ambiguous element identity ${elementPair.newValue?.id ?? elementPair.oldValue?.id ?? '(missing)'}; elements are not paired.`,
         });
       return itemDiff(
         elementPair,
@@ -307,16 +355,33 @@ export function diffFBD(oldBody?: NormalizedFBDBody, newBody?: NormalizedFBDBody
         elementCategory((elementPair.newValue ?? elementPair.oldValue)!)
       );
     });
+    const oldIds = new Map<string, string>(), newIds = new Map<string, string>();
+    elements.forEach((element, index) => {
+      if (element.ambiguous) return;
+      if (element.oldValue?.id !== undefined) oldIds.set(numericId(element.oldValue.id)!, `pair-${index}`);
+      if (element.newValue?.id !== undefined) newIds.set(numericId(element.newValue.id)!, `pair-${index}`);
+    });
+    const endpoint = (id: string, old: boolean) => (old ? oldIds : newIds).get(numericId(id)!)
+      ?? `unresolved:${numericId(id) ?? id}`;
     const connections = edgeDiffs(
       oldValue?.connections ?? [],
       newValue?.connections ?? [],
-      (connection) => stable([connection.kind, connection.from, connection.to])
+      (connection) => stable([connection.kind, connection.from, connection.to]),
+      false,
+      (connection, old) => ({ ...connection,
+        from: { ...connection.from, elementId: endpoint(connection.from.elementId, old) },
+        to: { ...connection.to, elementId: endpoint(connection.to.elementId, old) },
+      })
     );
     const attachments = edgeDiffs(
       oldValue?.attachments ?? [],
       newValue?.attachments ?? [],
       (attachment) => stable([attachment.fromElementId, attachment.toElementId]),
-      true
+      true,
+      (attachment, old) => ({ ...attachment,
+        fromElementId: endpoint(attachment.fromElementId, old),
+        toElementId: endpoint(attachment.toElementId, old),
+      })
     );
     const changes = properties(
       oldValue && {

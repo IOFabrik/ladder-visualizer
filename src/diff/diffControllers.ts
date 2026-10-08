@@ -8,7 +8,7 @@
  * Matching strategy:
  *   - Programs → name
  *   - Routines → name (within their program)
- *   - Rungs → rungNumber
+ *   - Rungs → unchanged sequence anchors, then relative position
  *   - Tags → name
  *   - Data types → name
  *   - Data type members → name
@@ -48,7 +48,7 @@ import type {
 
 import { diffFBD } from './diffFBD';
 
-import { matchByKey, matchByNumericKey, diffProperties, valuesEqual } from './matching';
+import { matchByKey, diffProperties, valuesEqual } from './matching';
 
 // ============================================================================
 // Main Entry Point
@@ -254,11 +254,13 @@ function diffRoutines(
     );
 
     let rungDiffs: RungDiff[] | undefined;
+    let rungAlignment: RoutineDiff['rungAlignment'];
     let stDiff: STDiff | undefined;
     let summary: RoutineDiff['summary'] | undefined;
 
     if (newItem.type === 'RLL' || oldItem.type === 'RLL') {
-      rungDiffs = diffRungs(oldItem.rungs, newItem.rungs);
+      rungAlignment = alignRungs(oldItem.rungs, newItem.rungs);
+      rungDiffs = diffRungs(rungAlignment);
       summary = {
         rungsAdded: rungDiffs.filter((r) => r.kind === 'added').length,
         rungsRemoved: rungDiffs.filter((r) => r.kind === 'removed').length,
@@ -281,6 +283,7 @@ function diffRoutines(
         kind: 'modified',
         routineType: newItem.type,
         rungDiffs: hasRungChanges ? rungDiffs : undefined,
+        rungAlignment,
         stDiff: hasSTChanges ? stDiff : undefined,
         fbdDiff: fbdDiff?.hasChanges ? fbdDiff : undefined,
         propertyChanges: propertyChanges.length > 0 ? propertyChanges : undefined,
@@ -300,35 +303,82 @@ function diffRoutines(
 
 const RUNG_PROPS = ['comment', 'type'];
 
-function diffRungs(
+/** Exported numbers change on insertion. Reserve unchanged sequence anchors first. */
+function alignRungs(
   oldRungs: NormalizedRung[],
   newRungs: NormalizedRung[],
-): RungDiff[] {
-  const { added, removed, matched } = matchByNumericKey(
-    oldRungs,
-    newRungs,
-    (r) => r.number,
+): NonNullable<RoutineDiff['rungAlignment']> {
+  const key = (rung: NormalizedRung) => JSON.stringify([rung.raw, rung.comment, rung.type]);
+  const oldKeys = oldRungs.map(key), newKeys = newRungs.map(key);
+  const table = Array.from({ length: oldRungs.length + 1 }, () =>
+    new Uint32Array(newRungs.length + 1)
   );
+  for (let i = oldRungs.length - 1; i >= 0; i--) {
+    for (let j = newRungs.length - 1; j >= 0; j--) {
+      table[i][j] = oldKeys[i] === newKeys[j] ? table[i + 1][j + 1] + 1
+        : Math.max(table[i + 1][j], table[i][j + 1]);
+    }
+  }
+  const pairs: NonNullable<RoutineDiff['rungAlignment']> = [];
+  let oldCursor = 0, newCursor = 0;
+  const span = (oldEnd: number, newEnd: number) => {
+    const oldStart = oldCursor, newStart = newCursor;
+    // Within an unanchored span, prefer a small logic edit over an unrelated insertion.
+    const tokens = (raw: string) => new Set(raw.match(/[\w.$:]+/g) ?? []);
+    const oldTokens = oldRungs.slice(oldCursor, oldEnd).map(rung => tokens(rung.raw));
+    const newTokens = newRungs.slice(newCursor, newEnd).map(rung => tokens(rung.raw));
+    const costs = Array.from({ length: oldTokens.length + 1 }, () => new Float64Array(newTokens.length + 1));
+    const editCost = (i: number, j: number) => {
+      if (oldRungs[oldStart + i].number - oldStart - i !== newRungs[newStart + j].number - newStart - j)
+        return Infinity;
+      const common = [...oldTokens[i]].filter(token => newTokens[j].has(token)).length;
+      return Math.max(0.25, 1 - common / Math.max(1, oldTokens[i].size, newTokens[j].size));
+    };
+    for (let i = oldTokens.length; i >= 0; i--) {
+      for (let j = newTokens.length; j >= 0; j--) {
+        costs[i][j] = i === oldTokens.length ? newTokens.length - j
+          : j === newTokens.length ? oldTokens.length - i
+          : Math.min(costs[i + 1][j] + 1, costs[i][j + 1] + 1, costs[i + 1][j + 1] + editCost(i, j));
+      }
+    }
+    let i = 0, j = 0;
+    while (oldCursor < oldEnd || newCursor < newEnd) {
+      const oldRung = oldCursor < oldEnd ? oldRungs[oldCursor] : undefined;
+      const newRung = newCursor < newEnd ? newRungs[newCursor] : undefined;
+      if (oldRung && newRung && costs[i][j] === costs[i + 1][j + 1] + editCost(i, j)) {
+        pairs.push({ oldRung, newRung }); i++; j++; oldCursor++; newCursor++;
+      } else if (oldRung && (!newRung || costs[i + 1][j] < costs[i][j + 1])) {
+        pairs.push({ oldRung }); i++; oldCursor++;
+      } else {
+        pairs.push({ newRung }); j++; newCursor++;
+      }
+    }
+  };
+  let i = 0, j = 0;
+  while (i < oldRungs.length && j < newRungs.length) {
+    if (oldKeys[i] === newKeys[j]) {
+      span(i, j);
+      pairs.push({ oldRung: oldRungs[i++], newRung: newRungs[j++] });
+      oldCursor = i; newCursor = j;
+    } else if (table[i][j + 1] >= table[i + 1][j]) j++;
+    else i++;
+  }
+  span(oldRungs.length, newRungs.length);
+  return pairs;
+}
 
+function diffRungs(alignment: NonNullable<RoutineDiff['rungAlignment']>): RungDiff[] {
   const diffs: RungDiff[] = [];
-
-  for (const rung of added) {
-    diffs.push({
-      rungNumber: rung.number,
-      kind: 'added',
-      newRung: rung,
-    });
-  }
-
-  for (const rung of removed) {
-    diffs.push({
-      rungNumber: rung.number,
-      kind: 'removed',
-      oldRung: rung,
-    });
-  }
-
-  for (const { oldItem, newItem } of matched) {
+  for (const { oldRung: oldItem, newRung: newItem } of alignment) {
+    if (!oldItem || !newItem) {
+      diffs.push({
+        rungNumber: (newItem ?? oldItem)!.number,
+        kind: newItem ? 'added' : 'removed',
+        oldRung: oldItem,
+        newRung: newItem,
+      });
+      continue;
+    }
     // Compare rung raw text (the canonical representation of the logic)
     const rawChanged = oldItem.raw !== newItem.raw;
     const propertyChanges = diffProperties(
@@ -339,7 +389,7 @@ function diffRungs(
 
     if (rawChanged || propertyChanges.length > 0) {
       diffs.push({
-        rungNumber: oldItem.number,
+        rungNumber: newItem.number,
         kind: 'modified',
         oldRung: oldItem,
         newRung: newItem,

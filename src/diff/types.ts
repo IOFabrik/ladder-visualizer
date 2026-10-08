@@ -4,7 +4,7 @@
  * These types represent the difference between two NormalizedController instances,
  * broken down by section (programs, routines, tags, data types, AOIs, modules).
  *
- * Each entity is matched by a stable identifier (name, rungNumber, module id)
+ * Entities are matched by stable names or aligned content
  * and classified as added, removed, or modified.
  */
 
@@ -70,7 +70,7 @@ export interface ControllerInfoDiff {
 
 /** A diff entry for a single rung within an RLL routine. */
 export interface RungDiff {
-  /** The rung number used for matching (0-indexed). */
+  /** Display number: the new rung number, or the old number for a removal. */
   rungNumber: number;
   /** The kind of change. */
   kind: ChangeKind;
@@ -112,6 +112,8 @@ export interface RoutineDiff {
   routineType?: NormalizedRoutineType;
   /** For RLL routines: per-rung diffs. Only present when kind is 'modified'. */
   rungDiffs?: RungDiff[];
+  /** Complete sequence alignment, including unchanged rungs and original source numbers. */
+  rungAlignment?: Array<{ oldRung?: NormalizedRung; newRung?: NormalizedRung }>;
   /** For ST routines: text diff. Only present when kind is 'modified'. */
   stDiff?: STDiff;
   /** Normalized FBD comparison, including complete sheet pairs for visualization. */
