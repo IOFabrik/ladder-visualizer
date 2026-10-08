@@ -270,13 +270,34 @@ function pairElements(oldItems: NormalizedFBDElement[], newItems: NormalizedFBDE
   const invalidOld = new Set(sourcePairs.filter((pair) => pair.ambiguous).map((pair) => pair.oldIndex));
   const invalidNew = new Set(sourcePairs.filter((pair) => pair.ambiguous).map((pair) => pair.newIndex));
   const matches = new Map<number, number>(), used = new Set<number>();
+  const exactKey = (element: NormalizedFBDElement) => stable(elementComparable(element));
   const identity = (element: NormalizedFBDElement, operand = true) => stable(
     Object.fromEntries(Object.entries(element).filter(([key]) =>
       ['kind', 'instruction', 'name', 'referenceType', 'connectorType', 'operation', 'sourceKind',
-        ...(operand ? ['operand'] : [])].includes(key)))
+        'routine', 'text', ...(operand ? ['operand'] : [])].includes(key)))
   );
+  const addressesByContent = (items: NormalizedFBDElement[]) => {
+    const groups = new Map<string, string[]>();
+    items.forEach(element => {
+      const key = identity(element), ids = groups.get(key) ?? [];
+      ids.push(numericId(element.id) ?? '(missing)');
+      groups.set(key, ids);
+    });
+    return new Map([...groups].map(([key, ids]) => [key, stable(ids.sort())]));
+  };
+  const oldAddresses = addressesByContent(oldItems), newAddresses = addressesByContent(newItems);
+  // An unchanged semantic group at the same unique addresses retains correspondence
+  // through real moves/metadata edits, including repeated elements.
+  for (const pair of sourcePairs) {
+    if (pair.ambiguous || !pair.oldValue || !pair.newValue) continue;
+    const key = identity(pair.oldValue);
+    if (key === identity(pair.newValue) && oldAddresses.get(key) === newAddresses.get(key)) {
+      matches.set(pair.newIndex!, pair.oldIndex!);
+      used.add(pair.oldIndex!);
+    }
+  }
   for (const keyOf of [
-    (element: NormalizedFBDElement) => stable(elementComparable(element)),
+    exactKey,
     (element: NormalizedFBDElement) => identity(element),
     (element: NormalizedFBDElement) => identity(element, false),
     (element: NormalizedFBDElement) => stable([element.kind, element.position]),
@@ -291,6 +312,16 @@ function pairElements(oldItems: NormalizedFBDElement[], newItems: NormalizedFBDE
         matches.set(pair.newValue.index, pair.oldValue.index);
         used.add(pair.oldValue.index);
       }
+    }
+  }
+  // Retain same-kind edits at a source address only when the entire unique address
+  // set is stable and semantic matches give no evidence of renumbering.
+  if (sourcePairs.every(pair => !pair.ambiguous && pair.oldValue && pair.newValue)
+    && [...matches].every(([next, old]) => numericId(oldItems[old].id) === numericId(newItems[next].id))) {
+    for (const pair of sourcePairs) {
+      if (matches.has(pair.newIndex!) || used.has(pair.oldIndex!) || pair.oldValue!.kind !== pair.newValue!.kind) continue;
+      matches.set(pair.newIndex!, pair.oldIndex!);
+      used.add(pair.oldIndex!);
     }
   }
   const result: Pair<NormalizedFBDElement>[] = newItems.map((newValue, newIndex) => {

@@ -303,6 +303,100 @@ function diffRoutines(
 
 const RUNG_PROPS = ['comment', 'type'];
 
+interface RungSequencePair { oldIndex?: number; newIndex?: number }
+
+/** Hirschberg alignment keeps score rows, rather than a table for the entire routine. */
+function alignRungSequence(
+  oldStart: number, oldEnd: number, newStart: number, newEnd: number,
+  cost: (oldIndex: number, newIndex: number) => number,
+): RungSequencePair[] {
+  const prefix: RungSequencePair[] = [];
+  while (oldStart < oldEnd && newStart < newEnd && cost(oldStart, newStart) === 0) {
+    prefix.push({ oldIndex: oldStart++, newIndex: newStart++ });
+  }
+  if (oldStart === oldEnd) return prefix.concat(Array.from({ length: newEnd - newStart },
+    (_, index) => ({ newIndex: newStart + index })));
+  if (newStart === newEnd) return prefix.concat(Array.from({ length: oldEnd - oldStart },
+    (_, index) => ({ oldIndex: oldStart + index })));
+  if (oldEnd - oldStart === 1) {
+    let match: number | undefined, best = 2;
+    for (let index = newStart; index < newEnd; index++) {
+      const value = cost(oldStart, index);
+      if (value < best) { best = value; match = index; }
+    }
+    if (match === undefined) prefix.push({ oldIndex: oldStart });
+    for (let index = newStart; index < newEnd; index++) {
+      prefix.push({ newIndex: index, oldIndex: index === match ? oldStart : undefined });
+    }
+    return prefix;
+  }
+  const middle = (oldStart + oldEnd) >>> 1;
+  const scoreRow = (start: number, end: number, reverse: boolean) => {
+    const row = Float64Array.from({ length: newEnd - newStart + 1 }, (_, index) => index);
+    for (let i = 0; i < end - start; i++) {
+      let diagonal = row[0];
+      row[0] = i + 1;
+      for (let j = 1; j < row.length; j++) {
+        const previous = row[j];
+        row[j] = Math.min(previous + 1, row[j - 1] + 1, diagonal + cost(
+          reverse ? end - i - 1 : start + i,
+          reverse ? newEnd - j : newStart + j - 1));
+        diagonal = previous;
+      }
+    }
+    return row;
+  };
+  let forward = scoreRow(oldStart, middle, false), backward = scoreRow(middle, oldEnd, true);
+  let split = 0, best = Infinity;
+  for (let index = 0; index < forward.length; index++) {
+    const value = forward[index] + backward[backward.length - index - 1];
+    if (value < best) { best = value; split = index; }
+  }
+  // Release the score rows before descending into either half.
+  forward = backward = new Float64Array(0);
+  return prefix.concat(
+    alignRungSequence(oldStart, middle, newStart, newStart + split, cost),
+    alignRungSequence(middle, oldEnd, newStart + split, newEnd, cost));
+}
+
+/** Myers is fast for ordinary edits; cap its trace and retain the bounded-memory fallback. */
+function exactRungAnchors(oldKeys: string[], newKeys: string[]): Array<{ oldIndex: number; newIndex: number }> {
+  const trace: Int32Array[] = [];
+  for (let depth = 0; depth <= oldKeys.length + newKeys.length; depth++) {
+    if ((depth + 1) ** 2 > 1_000_000) break;
+    const frontier = new Int32Array(2 * depth + 1).fill(-1);
+    const previous = trace[depth - 1];
+    for (let diagonal = -depth; diagonal <= depth; diagonal += 2) {
+      const left = previous?.[diagonal + depth - 2] ?? -1;
+      const right = previous?.[diagonal + depth] ?? -1;
+      let x = depth === 0 ? 0 : diagonal === -depth || (diagonal !== depth && left < right)
+        ? right : left + 1;
+      let y = x - diagonal;
+      while (x < oldKeys.length && y < newKeys.length && oldKeys[x] === newKeys[y]) { x++; y++; }
+      frontier[diagonal + depth] = x;
+      if (x < oldKeys.length || y < newKeys.length) continue;
+      trace.push(frontier);
+      const anchors: Array<{ oldIndex: number; newIndex: number }> = [];
+      x = oldKeys.length; y = newKeys.length;
+      for (let step = depth; step > 0; step--) {
+        const k = x - y, row = trace[step - 1];
+        const priorK = k === -step || (k !== step && (row[k + step - 2] ?? -1) < (row[k + step] ?? -1))
+          ? k + 1 : k - 1;
+        const priorX = row[priorK + step - 1], priorY = priorX - priorK;
+        while (x > priorX && y > priorY) anchors.push({ oldIndex: --x, newIndex: --y });
+        x = priorX; y = priorY;
+      }
+      while (x > 0 && y > 0) anchors.push({ oldIndex: --x, newIndex: --y });
+      return anchors.reverse();
+    }
+    trace.push(frontier);
+  }
+  return alignRungSequence(0, oldKeys.length, 0, newKeys.length,
+    (i, j) => oldKeys[i] === newKeys[j] ? 0 : Infinity).flatMap(pair =>
+    pair.oldIndex === undefined || pair.newIndex === undefined ? []
+      : [{ oldIndex: pair.oldIndex, newIndex: pair.newIndex }]);
+}
+
 /** Exported numbers change on insertion. Reserve unchanged sequence anchors first. */
 function alignRungs(
   oldRungs: NormalizedRung[],
@@ -310,15 +404,14 @@ function alignRungs(
 ): NonNullable<RoutineDiff['rungAlignment']> {
   const key = (rung: NormalizedRung) => JSON.stringify([rung.raw, rung.comment, rung.type]);
   const oldKeys = oldRungs.map(key), newKeys = newRungs.map(key);
-  const table = Array.from({ length: oldRungs.length + 1 }, () =>
-    new Uint32Array(newRungs.length + 1)
-  );
-  for (let i = oldRungs.length - 1; i >= 0; i--) {
-    for (let j = newRungs.length - 1; j >= 0; j--) {
-      table[i][j] = oldKeys[i] === newKeys[j] ? table[i + 1][j + 1] + 1
-        : Math.max(table[i + 1][j], table[i][j + 1]);
-    }
+  const newKeySet = new Set(newKeys);
+  // Metadata-only edits at the same logic positions need no sequence search.
+  // Keep exact anchors when an unchanged full rung moved to another position.
+  if (oldRungs.length === newRungs.length && oldRungs.every((rung, index) =>
+    rung.raw === newRungs[index].raw && (oldKeys[index] === newKeys[index] || !newKeySet.has(oldKeys[index])))) {
+    return oldRungs.map((oldRung, index) => ({ oldRung, newRung: newRungs[index] }));
   }
+  const anchors = oldKeys.some(key => newKeySet.has(key)) ? exactRungAnchors(oldKeys, newKeys) : [];
   const pairs: NonNullable<RoutineDiff['rungAlignment']> = [];
   let oldCursor = 0, newCursor = 0;
   const span = (oldEnd: number, newEnd: number) => {
@@ -327,41 +420,23 @@ function alignRungs(
     const tokens = (raw: string) => new Set(raw.match(/[\w.$:]+/g) ?? []);
     const oldTokens = oldRungs.slice(oldCursor, oldEnd).map(rung => tokens(rung.raw));
     const newTokens = newRungs.slice(newCursor, newEnd).map(rung => tokens(rung.raw));
-    const costs = Array.from({ length: oldTokens.length + 1 }, () => new Float64Array(newTokens.length + 1));
     const editCost = (i: number, j: number) => {
-      if (oldRungs[oldStart + i].number - oldStart - i !== newRungs[newStart + j].number - newStart - j)
+      if (oldRungs[i].number - i !== newRungs[j].number - j)
         return Infinity;
-      const common = [...oldTokens[i]].filter(token => newTokens[j].has(token)).length;
-      return Math.max(0.25, 1 - common / Math.max(1, oldTokens[i].size, newTokens[j].size));
+      const oldSet = oldTokens[i - oldStart], newSet = newTokens[j - newStart];
+      const common = [...oldSet].filter(token => newSet.has(token)).length;
+      return Math.max(0.25, 1 - common / Math.max(1, oldSet.size, newSet.size));
     };
-    for (let i = oldTokens.length; i >= 0; i--) {
-      for (let j = newTokens.length; j >= 0; j--) {
-        costs[i][j] = i === oldTokens.length ? newTokens.length - j
-          : j === newTokens.length ? oldTokens.length - i
-          : Math.min(costs[i + 1][j] + 1, costs[i][j + 1] + 1, costs[i + 1][j + 1] + editCost(i, j));
-      }
+    for (const pair of alignRungSequence(oldStart, oldEnd, newStart, newEnd, editCost)) {
+      pairs.push({ oldRung: pair.oldIndex === undefined ? undefined : oldRungs[pair.oldIndex],
+        newRung: pair.newIndex === undefined ? undefined : newRungs[pair.newIndex] });
     }
-    let i = 0, j = 0;
-    while (oldCursor < oldEnd || newCursor < newEnd) {
-      const oldRung = oldCursor < oldEnd ? oldRungs[oldCursor] : undefined;
-      const newRung = newCursor < newEnd ? newRungs[newCursor] : undefined;
-      if (oldRung && newRung && costs[i][j] === costs[i + 1][j + 1] + editCost(i, j)) {
-        pairs.push({ oldRung, newRung }); i++; j++; oldCursor++; newCursor++;
-      } else if (oldRung && (!newRung || costs[i + 1][j] < costs[i][j + 1])) {
-        pairs.push({ oldRung }); i++; oldCursor++;
-      } else {
-        pairs.push({ newRung }); j++; newCursor++;
-      }
-    }
+    oldCursor = oldEnd; newCursor = newEnd;
   };
-  let i = 0, j = 0;
-  while (i < oldRungs.length && j < newRungs.length) {
-    if (oldKeys[i] === newKeys[j]) {
-      span(i, j);
-      pairs.push({ oldRung: oldRungs[i++], newRung: newRungs[j++] });
-      oldCursor = i; newCursor = j;
-    } else if (table[i][j + 1] >= table[i + 1][j]) j++;
-    else i++;
+  for (const { oldIndex, newIndex } of anchors) {
+    span(oldIndex, newIndex);
+    pairs.push({ oldRung: oldRungs[oldIndex], newRung: newRungs[newIndex] });
+    oldCursor = oldIndex + 1; newCursor = newIndex + 1;
   }
   span(oldRungs.length, newRungs.length);
   return pairs;

@@ -178,6 +178,114 @@ describe('Studio 5000 renumbering', () => {
     expect(diff.sheets[0].elements.every(element => element.ambiguous)).toBe(true);
   });
 
+  it('does not invent changes in identical repeated blocks with unchanged source addresses', () => {
+    const old = body([block('2', 'SRTP', 'Same'), block('3', 'SRTP', 'Same')]);
+    const next = structuredClone(old);
+    next.sheets[0].elements.reverse();
+    const diff = diffFBD(old, next);
+    expect(diff.hasChanges).toBe(false);
+    expect(diff.complete).toBe(true);
+    expect(diff.sheets[0].elements.every(element => element.kind === 'unchanged')).toBe(true);
+  });
+
+  it.each(['unchanged', 'inserted', 'edited'])(
+    'compares a large %s routine without a quadratic memory increase', (scenario) => {
+      const raws = Array.from({ length: 6000 }, (_, index) => `XIC(Input${index})OTE(Output${index});`);
+      const next = [...raws];
+      if (scenario === 'inserted') next.splice(1, 0, 'NOP();');
+      if (scenario === 'edited') next[1] = 'XIO(Input1)OTE(Output1);';
+      const old = controller(raws), nu = controller(next);
+      const memoryBefore = process.resourceUsage().maxRSS;
+      const started = performance.now();
+      const diff = diffControllers(old, nu);
+      expect(diff.summary.rungs.added).toBe(scenario === 'inserted' ? 1 : 0);
+      expect(diff.summary.rungs.modified).toBe(scenario === 'edited' ? 1 : 0);
+      expect(diff.summary.rungs.removed).toBe(0);
+      expect(process.resourceUsage().maxRSS - memoryBefore).toBeLessThan(64 * 1024);
+      expect(performance.now() - started).toBeLessThan(1500);
+    }
+  );
+
+  it('preserves moves of repeated blocks into each other\'s previous positions', () => {
+    const old = body([block('2', 'SRTP', 'Same'), block('3', 'SRTP', 'Same')]);
+    old.sheets[0].elements[1].position = { x: '500', y: '140' };
+    const next = structuredClone(old);
+    next.sheets[0].elements[0].position = { x: '500', y: '140' };
+    next.sheets[0].elements[1].position = { x: '720', y: '140' };
+    const diff = diffFBD(old, next);
+    expect(diff.complete).toBe(true);
+    expect(diff.sheets[0].elements.map(pair => [pair.kind, pair.oldValue?.id, pair.newValue?.id]))
+      .toEqual([['modified', '2', '2'], ['modified', '3', '3']]);
+    expect(diff.sheets[0].elements.every(pair => pair.propertyChanges.some(change => change.property === 'position.x')))
+      .toBe(true);
+  });
+
+  it.each(['block', 'function', 'add-on-instruction', 'routine-control', 'text-box'] as const)(
+    'preserves combined logic and position edits to a %s with stable addresses', (kind) => {
+      const base = { id: '2', position: { x: '280', y: '140' } };
+      const elements: Record<typeof kind, NormalizedFBDElement> = {
+        block: block('2', 'SRTP', 'Existing'),
+        function: { ...base, kind: 'function', instruction: 'ADD', ports: [] },
+        'add-on-instruction': { ...base, kind: 'add-on-instruction', name: 'AOI_A', ports: [], bindings: [], visiblePins: [] },
+        'routine-control': { ...base, kind: 'routine-control', operation: 'JSR', routine: 'A', inputParameters: [], returnParameters: [] },
+        'text-box': { ...base, kind: 'text-box', text: 'Before' },
+      };
+      const old = body([elements[kind]]), next = structuredClone(old);
+      const element = next.sheets[0].elements[0];
+      element.position = { x: '500', y: '300' };
+      if (element.kind === 'block') { element.instruction = 'LES'; element.operand = 'Changed'; }
+      if (element.kind === 'function') element.instruction = 'SUB';
+      if (element.kind === 'add-on-instruction') element.name = 'AOI_B';
+      if (element.kind === 'routine-control') { element.operation = 'RET'; element.routine = undefined; }
+      if (element.kind === 'text-box') element.text = 'After';
+      const diff = diffFBD(old, next);
+      expect(diff.complete).toBe(true);
+      expect(diff.sheets[0].elements).toHaveLength(1);
+      expect(diff.sheets[0].elements[0].kind).toBe('modified');
+      expect(diff.sheets[0].elements[0].propertyChanges.some(change => change.property === 'position.x')).toBe(true);
+      expect(diff.sheets[0].elements[0].propertyChanges.some(change => change.category === (kind === 'text-box' ? 'presentation' : 'logic'))).toBe(true);
+    }
+  );
+
+  it('compares bulk metadata edits using unchanged rung logic without expensive sequence search', () => {
+    const raws = Array.from({ length: 3000 }, (_, index) => `XIC(Input${index})OTE(Output${index});`);
+    const old = controller(raws), next = controller(raws);
+    next.programs[0].routines[0].rungs.forEach(rung => { rung.comment = 'Updated comment'; rung.type = 'Insert'; });
+    const started = performance.now();
+    const diff = diffControllers(old, next);
+    expect(diff.summary.rungs).toEqual({ added: 0, removed: 0, modified: 3000 });
+    expect(performance.now() - started).toBeLessThan(1500);
+  });
+
+  it('retains source order and multiplicity across repeated insertions and deletions', () => {
+    let seed = 111;
+    const random = (max: number) => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed % max; };
+    for (let example = 0; example < 160; example++) {
+      const raws = Array.from({ length: random(16) }, () => `XIC(Input${random(5)})OTE(Output);`);
+      const next = [...raws];
+      next.splice(random(next.length + 1), 0, 'NOP();');
+      next.splice(random(next.length + 1), 0, raws[random(Math.max(1, raws.length))] ?? 'NOP();');
+      for (const reverse of [false, true]) {
+        const old = controller(reverse ? next : raws), nu = controller(reverse ? raws : next);
+        const diff = diffControllers(old, nu).programs[0].routineDiffs[0];
+        expect(diff.summary).toEqual({ rungsAdded: reverse ? 0 : 2, rungsRemoved: reverse ? 2 : 0, rungsModified: 0 });
+        expect(diff.rungAlignment!.flatMap(pair => pair.oldRung ? [pair.oldRung] : []))
+          .toEqual(old.programs[0].routines[0].rungs);
+        expect(diff.rungAlignment!.flatMap(pair => pair.newRung ? [pair.newRung] : []))
+          .toEqual(nu.programs[0].routines[0].rungs);
+      }
+    }
+  });
+
+  it('preserves an exact rung anchor beyond the bounded edit trace', () => {
+    const old = controller(['NOP();']);
+    const next = controller([...Array.from({ length: 1001 }, (_, index) => `XIC(Input${index})OTE(Output);`), 'NOP();']);
+    const diff = diffControllers(old, next).programs[0].routineDiffs[0];
+    expect(diff.summary).toEqual({ rungsAdded: 1001, rungsRemoved: 0, rungsModified: 0 });
+    expect(diff.rungAlignment!.at(-1)?.oldRung).toBe(old.programs[0].routines[0].rungs[0]);
+    expect(diff.rungAlignment!.at(-1)?.newRung?.number).toBe(1001);
+  });
+
   it('renders renumbered existing elements and connections with unchanged colors', () => {
     const old = parseString(readFileSync(new URL('../fixtures/l5x/fbd-level-control-v35.L5X', import.meta.url), 'utf8'), 'l5x')
       .data!.programs[0].routines[0].fbd!;
