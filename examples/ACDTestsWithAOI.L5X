@@ -67,7 +67,7 @@
 </Module>
 </Modules>
 <AddOnInstructionDefinitions>
-<AddOnInstructionDefinition Name="AddOnInstruction" Revision="1.7" RevisionExtension="ExtendedText" Vendor="ACD-TOOLS" ExecutePrescan="false" ExecutePostscan="false" ExecuteEnableInFalse="false" CreatedDate="2024-07-11T00:34:36.529Z" CreatedBy="ControlZebra" EditedDate="2024-07-11T00:35:29.863Z" EditedBy="ControlZebra"
+<AddOnInstructionDefinition Name="AddOnInstruction" Revision="1.7" RevisionExtension="ExtendedText" Vendor="ACD-TOOLS" ExecutePrescan="false" ExecutePostscan="false" ExecuteEnableInFalse="false" CreatedDate="2024-07-11T00:34:36.529Z" CreatedBy="IOFabrik" EditedDate="2024-07-11T00:35:29.863Z" EditedBy="IOFabrik"
  SoftwareRevision="v34.01">
 <Description>
 <![CDATA[AddOnInstruction Description]]>
