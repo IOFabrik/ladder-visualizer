@@ -2,7 +2,7 @@
 <RSLogix5000Content SchemaRevision="1.0" SoftwareRevision="33.00" TargetName="ControllerConfigurationV33" TargetType="Controller" ContainsContext="false">
   <Controller Use="Target" Name="ControllerConfigurationV33" ProcessorType="1756-L85E" MajorRev="33" MinorRev="11" TimeSlice="20" ShareUnusedTimeSlice="50" CommDriver="EtherNet/IP" CommPath="AB_ETHIP-1\10.20.30.40\Backplane\0" CurrentProjectLanguage="en-US" IOForcesEnabled="false">
     <RedundancyInfo UId="3301" Enabled="true" KeepTestEditsOnSwitchOver="false" IOMemoryPadPercentage="10" DataTablePadPercentage="20" />
-    <Security Code="33" SecurityAuthorityID="authority-v33" SecurityAuthorityURI="urn:controlzebra:security:v33" ChangesToDetect="Tags" TrustedSlots="0,1" />
+    <Security Code="33" SecurityAuthorityID="authority-v33" SecurityAuthorityURI="urn:iofabrik:security:v33" ChangesToDetect="Tags" TrustedSlots="0,1" />
     <SafetyInfo UId="3302" SafetySignature="sig-v33" SafetyLocked="false" ConfigureSafetyIOAlways="true" SignatureRunModeProtect="false" SafetySigned="true" SafetyLevel="SIL2"><SafetyTaskFaultString>Safety fault v33</SafetyTaskFaultString><SafetyTagMap>SafetyInput=StandardInput</SafetyTagMap></SafetyInfo>
     <CommPorts>
       <SerialPort Channel="0" BaudRate="19200" Parity="No Parity" DataBits="8 Bits of Data" StopBits="1 Stop Bit" ComDriverId="DF1" ControlLine="No Handshake" />

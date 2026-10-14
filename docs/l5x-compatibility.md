@@ -101,7 +101,7 @@ real-export shape evidence. The new fixtures are synthetic schema-based inputs.
 and the existing Structured Text theme variables. The library demo selects this
 fallback for SFC routines. Raw inspection does not normalize SFC semantics: source
 fragments and partial-status diagnostics remain, with no rich SFC chart, step/action
-navigation, protected-content decoding, or ControlZebra integration in this slice.
+navigation, protected-content decoding, or IOFabrik integration in this slice.
 
 ### FBD compatibility boundary
 
@@ -189,7 +189,7 @@ Every fixture declares both `sourceCounts` and `normalizedCounts`:
 
 Every corpus fixture other than the intentionally malformed and entity-policy cases must validate against its matching v33, v34, or v35 XSD. `npm run test:schema` uses `xmllint` and the schema directory named by `L5X_SCHEMA_DIR`; locally it defaults to the sibling `l5x-schema` checkout.
 
-CI checks out `ControlZebra/l5x-schema` at commit `441573b4f96493a0fa31627a51b8a4ecb857e980`, so schema changes cannot silently alter the baseline. Intentionally malformed and entity-policy fixtures are excluded from XSD success validation and remain covered by parser assertions.
+CI checks out `IOFabrik/l5x-schema` at commit `441573b4f96493a0fa31627a51b8a4ecb857e980`, so schema changes cannot silently alter the baseline. Intentionally malformed and entity-policy fixtures are excluded from XSD success validation and remain covered by parser assertions.
 
 ## Adding or changing fixtures
 
@@ -206,4 +206,4 @@ Report corpus results by profile and Studio 5000 version, including complete, pa
 
 ## Format reference
 
-The fixture taxonomy follows Rockwell Automation publication 1756-RM014D-EN-P, _Logix 5000 Controllers Import/Export_ (September 2025). Fixtures are continuously checked against the corresponding `l5x-v33.xsd`, `l5x-v34.xsd`, or `l5x-v35.xsd` from the pinned ControlZebra `l5x-schema` revision. Public vendor-generated component exports corroborate root target spellings and the v35 encoded AOI wrapper shape; committed fixtures contain synthetic payloads and no third-party project logic.
+The fixture taxonomy follows Rockwell Automation publication 1756-RM014D-EN-P, _Logix 5000 Controllers Import/Export_ (September 2025). Fixtures are continuously checked against the corresponding `l5x-v33.xsd`, `l5x-v34.xsd`, or `l5x-v35.xsd` from the pinned IOFabrik `l5x-schema` revision. Public vendor-generated component exports corroborate root target spellings and the v35 encoded AOI wrapper shape; committed fixtures contain synthetic payloads and no third-party project logic.
